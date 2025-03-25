@@ -1,0 +1,87 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_REGISTRY = 'your-registry'
+        BACKEND_IMAGE = '${DOCKER_REGISTRY}/backend-api'
+        PRODUCT_IMAGE = '${DOCKER_REGISTRY}/product-service'
+        KUBE_CONFIG = credentials('kubernetes-config')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                sh 'npm install'
+                sh 'npm test'
+            }
+        }
+
+        stage('Build Docker Images') {
+            parallel {
+                stage('Backend API') {
+                    steps {
+                        script {
+                            docker.build("${BACKEND_IMAGE}:${BUILD_NUMBER}", '-f Dockerfile .')
+                        }
+                    }
+                }
+                stage('Product Service') {
+                    steps {
+                        script {
+                            docker.build("${PRODUCT_IMAGE}:${BUILD_NUMBER}", '-f Dockerfile .')
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Push Docker Images') {
+            steps {
+                script {
+                    docker.withRegistry('https://${DOCKER_REGISTRY}', 'docker-credentials') {
+                        docker.image("${BACKEND_IMAGE}:${BUILD_NUMBER}").push()
+                        docker.image("${PRODUCT_IMAGE}:${BUILD_NUMBER}").push()
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    withKubeConfig([credentialsId: 'kubernetes-config']) {
+                        sh "kubectl apply -f k8s/"
+                        sh "kubectl set image deployment/backend-api backend-api=${BACKEND_IMAGE}:${BUILD_NUMBER}"
+                        sh "kubectl set image deployment/product-service product-service=${PRODUCT_IMAGE}:${BUILD_NUMBER}"
+                    }
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                script {
+                    withKubeConfig([credentialsId: 'kubernetes-config']) {
+                        sh 'kubectl rollout status deployment/backend-api'
+                        sh 'kubectl rollout status deployment/product-service'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}}
